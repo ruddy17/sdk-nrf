@@ -384,41 +384,18 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
 
 	LOG_INF("Received data from: %s", log_strdup(addr));
+        for(int i=0; i<len; i++)
+        {
+          printk("0x%02X ",data[i]);
+        }
+        printk("\n");
 
-	for (uint16_t pos = 0; pos != len;) {
-		struct uart_data_t *tx = k_malloc(sizeof(*tx));
+        uint8_t buf[30]={0};
+        memcpy(buf,data,len);
+        //buf[len]=0;
 
-		if (!tx) {
-			LOG_WRN("Not able to allocate UART send data buffer");
-			return;
-		}
+        printk("%s\n", buf);
 
-		/* Keep the last byte of TX buffer for potential LF char. */
-		size_t tx_data_size = sizeof(tx->data) - 1;
-
-		if ((len - pos) > tx_data_size) {
-			tx->len = tx_data_size;
-		} else {
-			tx->len = (len - pos);
-		}
-
-		memcpy(tx->data, &data[pos], tx->len);
-
-		pos += tx->len;
-
-		/* Append the LF character when the CR character triggered
-		 * transmission from the peer.
-		 */
-		if ((pos == len) && (data[len - 1] == '\r')) {
-			tx->data[tx->len] = '\n';
-			tx->len++;
-		}
-
-		err = uart_tx(uart, tx->data, tx->len, SYS_FOREVER_MS);
-		if (err) {
-			k_fifo_put(&fifo_uart_tx_data, tx);
-		}
-	}
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -486,10 +463,10 @@ void main(void)
 
 	configure_gpio();
 
-	err = uart_init();
-	if (err) {
-		error();
-	}
+	//err = uart_init();
+	//if (err) {
+	//	error();
+	//}
 
 	bt_conn_cb_register(&conn_callbacks);
 
@@ -524,9 +501,19 @@ void main(void)
 
 	printk("Starting Nordic UART service example\n");
 
+        k_sem_take(&ble_init_ok, K_FOREVER);
+        
+        uint8_t d[5]={1,2,3,4,5};
+
 	for (;;) {
 		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
 		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
+
+                if (bt_nus_send(NULL, d, sizeof(d))) {
+			LOG_WRN("Failed to send data over BLE connection");
+		}
+
+                d[0]++;
 	}
 }
 

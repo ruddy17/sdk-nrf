@@ -15,7 +15,12 @@
 #include <sys/util.h>
 
 #include <bluetooth/bluetooth.h>
+#include <bluetooth/uuid.h>
+#include <bluetooth/gatt.h>
 #include <bluetooth/hci.h>
+#include <bluetooth/services/nus.h>
+
+#include <settings/settings.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -28,6 +33,23 @@
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
+#define STACKSIZE CONFIG_BT_NUS_THREAD_STACK_SIZE
+#define PRIORITY 7
+
+static K_SEM_DEFINE(ble_init_ok, 0, 1);
+
+static struct bt_conn *current_conn;
+static struct bt_conn *auth_conn;
+
+static const struct bt_data ad[] = {
+	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+};
+
+static const struct bt_data sd[] = {
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_VAL),
+};
+
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   1000
 
@@ -38,7 +60,7 @@
 #define PIN		DT_GPIO_PIN(LED0_NODE,   gpios)
 #define FLAGS	DT_GPIO_FLAGS(LED0_NODE, gpios)
 
-LOG_MODULE_REGISTER(cdc_acm_echo, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(facel, LOG_LEVEL_INF);
 #define RING_BUF_SIZE 1024
 uint8_t ring_buffer[RING_BUF_SIZE];
 struct ring_buf ringbuf;
@@ -87,59 +109,81 @@ static void interrupt_handler(const struct device *dev, void *user_data)
 	}
 }
 
-static const struct bt_data ad[] = {
-	BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
-	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0xaa, 0xfe),
-	BT_DATA_BYTES(BT_DATA_SVC_DATA16,
-		      0xaa, 0xfe, /* Eddystone UUID */
-		      0x10, /* Eddystone-URL frame type */
-		      0x00, /* Calibrated Tx power at 0m */
-		      0x00, /* URL Scheme Prefix http://www. */
-		      'f', 'a', 'c', 'e', 'l', 
-		      0x00) /* .org */
-};
-
-/* Set Scan Response data */
-static const struct bt_data sd[] = {
-	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
-};
-
-static void bt_ready(int err)
+static void connected(struct bt_conn *conn, uint8_t err)
 {
-	char addr_s[BT_ADDR_LE_STR_LEN];
-	bt_addr_le_t addr = {0};
-	size_t count = 1;
+	char addr[BT_ADDR_LE_STR_LEN];
 
 	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);
+		LOG_ERR("Connection failed (err %u)", err);
 		return;
 	}
 
-	printk("Bluetooth initialized\n");
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	LOG_INF("Connected %s", log_strdup(addr));
 
-	/* Start advertising */
-	err = bt_le_adv_start(BT_LE_ADV_NCONN_IDENTITY, ad, ARRAY_SIZE(ad),
-			      sd, ARRAY_SIZE(sd));
-	if (err) {
-		printk("Advertising failed to start (err %d)\n", err);
-		return;
-	}
-
-	/* For connectable advertising you would use
-	 * bt_le_oob_get_local().  For non-connectable non-identity
-	 * advertising an non-resolvable private address is used;
-	 * there is no API to retrieve that.
-	 */
-
-	bt_id_get(&addr, &count);
-	bt_addr_le_to_str(&addr, addr_s, sizeof(addr_s));
-
-	printk("Beacon started, advertising as %s\n", addr_s);
+	current_conn = bt_conn_ref(conn);
 }
+
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+	LOG_INF("Disconnected: %s (reason %u)", log_strdup(addr), reason);
+
+	if (auth_conn) {
+		bt_conn_unref(auth_conn);
+		auth_conn = NULL;
+	}
+
+	if (current_conn) {
+		bt_conn_unref(current_conn);
+		current_conn = NULL;
+	}
+}
+
+static struct bt_conn_cb conn_callbacks = {
+	.connected    = connected,
+	.disconnected = disconnected,
+#ifdef CONFIG_BT_NUS_SECURITY_ENABLED
+	.security_changed = security_changed,
+#endif
+};
+
+static struct bt_conn_auth_cb conn_auth_callbacks;
+
+static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
+			  uint16_t len)
+{
+	char addr[BT_ADDR_LE_STR_LEN] = {0};
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
+
+	LOG_INF("Received data from: %s", log_strdup(addr));
+        for(int i=0; i<len; i++)
+        {
+          printk("0x%02X ",data[i]);
+        }
+        printk("\n");
+
+        uint8_t buf[30]={0};
+        memcpy(buf,data,len);
+
+        printk("%s\n", buf);
+
+}
+
+static struct bt_nus_cb nus_cb = {
+	.received = bt_receive_cb,
+};
+
+
 
 char buf[50];
 int n=0;
-const struct device *dev;
+const struct device *cdc;
+const struct device *dev_led;
 
 static void fetch_and_display(const struct device *sensor)
 {
@@ -165,30 +209,91 @@ static void fetch_and_display(const struct device *sensor)
 			sensor_value_to_double(&accel[1]),
 			sensor_value_to_double(&accel[2]));
 		ring_buf_put(&ringbuf, buf, n);
-		uart_irq_tx_enable(dev);
+		uart_irq_tx_enable(cdc);
 	}
 }
 
-static void trigger_handler(const struct device *dev, struct sensor_trigger *trig)
+static void accel_handler(const struct device *dev, struct sensor_trigger *trig)
 {
 	fetch_and_display(dev);
+}
+
+static void afe_handler(const struct device *dev, struct sensor_trigger *trig)
+{
+        gpio_pin_set(dev_led, 14, true);
+	struct sensor_value v[4];
+	
+	int rc = sensor_sample_fetch(dev);
+	if (rc == -EBADMSG) {
+		printk("OVERRUN\n");
+		rc = 0;
+	}
+	if (rc == 0) {
+		rc = sensor_channel_get(dev,
+					SENSOR_CHAN_VOLTAGE,
+					v);
+	}
+	if (rc < 0) {
+		printk("ERROR: Update failed\n");
+	} else {
+		n=sprintf(buf,"1:%i 2:%i ",
+			v[0].val1,
+			v[1].val1);
+		//ring_buf_put(&ringbuf, buf, n);
+		//uart_irq_tx_enable(cdc);
+                bt_nus_send(NULL, buf, n);
+                n=sprintf(buf,"3:%i 4:%i\n",
+			v[2].val1,
+			v[3].val1);
+                bt_nus_send(NULL, buf, n);
+	}
+        gpio_pin_set(dev_led, 14, false);
 }
 
 
 void main(void)
 {
-      // ---------------------------------------------------------- BT beacon
-      int err;
-      printk("Starting Beacon Demo\n");
-      /* Initialize the Bluetooth Subsystem */
-      err = bt_enable(bt_ready);
-      if (err) {
-              printk("Bluetooth init failed (err %d)\n", err);
+      int rc, err;
+      // ---------------------------------------------------------- BT Gatt Uart
+
+      bt_conn_cb_register(&conn_callbacks);
+
+      if (IS_ENABLED(CONFIG_BT_NUS_SECURITY_ENABLED)) {
+              bt_conn_auth_cb_register(&conn_auth_callbacks);
       }
+
+      err = bt_enable(NULL);
+      if (err) {
+              printk("Failed to enable BT\n");
+              return;
+      }
+
+      LOG_INF("Bluetooth initialized");
+
+      k_sem_give(&ble_init_ok);
+
+      if (IS_ENABLED(CONFIG_SETTINGS)) {
+              settings_load();
+      }
+
+      err = bt_nus_init(&nus_cb);
+      if (err) {
+              LOG_ERR("Failed to initialize UART service (err: %d)", err);
+              return;
+      }
+
+      err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd,
+                            ARRAY_SIZE(sd));
+      if (err) {
+              LOG_ERR("Advertising failed to start (err %d)", err);
+      }
+
+      printk("Starting Nordic UART service example\n");
+
       // ---------------------------------------------------------- USB serial
       int ret;
-      dev = device_get_binding("CDC_ACM_0");
-      if (!dev) {
+      cdc = device_get_binding("CDC_ACM_0");
+      if (!cdc) {
               printk("CDC ACM device not found\n");
               return;
       }
@@ -198,12 +303,11 @@ void main(void)
               return;
       }
       ring_buf_init(&ringbuf, sizeof(ring_buffer), ring_buffer);
-      uart_irq_callback_set(dev, interrupt_handler);
+      uart_irq_callback_set(cdc, interrupt_handler);
       /* Enable rx interrupts */
-      uart_irq_rx_enable(dev);
+      uart_irq_rx_enable(cdc);
 
-      // ---------------------------------------------------------- Blink
-      const struct device *dev_led;
+      // ---------------------------------------------------------- Led
       dev_led = device_get_binding(LED0);
       if (dev_led == NULL) {
               return;
@@ -214,48 +318,90 @@ void main(void)
               return;
       }
 
-      gpio_pin_set(dev_led, 14, true);
+      gpio_pin_set(dev_led, 14, false);
 
       // ---------------------------------------------------------- Accel
-      const struct device *sensor = device_get_binding(DT_LABEL(DT_N_S_soc_S_spi_40003000_S_lis2dw12_0));
-      if (sensor == NULL) {
-              printk("No device found\n");
+      //const struct device *accel = DEVICE_DT_GET(DT_NODELABEL(accel));
+      //if (accel == NULL) {
+      //        printk("No device found\n");
+      //        return;
+      //}
+      //if (!device_is_ready(accel)) {
+      //        printk("Device %s is not ready\n", accel->name);
+      //        return;
+      //}
+
+      //struct sensor_trigger accel_trig;
+
+      //accel_trig.type = SENSOR_TRIG_DATA_READY;
+      //accel_trig.chan = SENSOR_CHAN_ACCEL_XYZ;
+
+      //if (IS_ENABLED(CONFIG_LIS2DW12_ODR_RUNTIME)) {
+      //        struct sensor_value odr = {
+      //                .val1 = 2,
+      //        };
+
+      //        rc = sensor_attr_set(accel, accel_trig.chan,
+      //                                        SENSOR_ATTR_SAMPLING_FREQUENCY,
+      //                                        &odr);
+      //        if (rc != 0) {
+      //                printk("Failed to set odr: %d\n", rc);
+      //                return;
+      //        }
+      //        printk("Sampling at %u Hz\n", odr.val1);
+      //}
+
+      //rc = sensor_trigger_set(accel, &accel_trig, accel_handler);
+      //if (rc != 0) {
+      //        printk("Failed to set trigger: %d\n", rc);
+      //}
+
+      // ---------------------------------------------------------- Analog frontend
+      const struct device *afe = DEVICE_DT_GET(DT_NODELABEL(afe));
+      if (afe == NULL) {
+              printk("No afe device found\n");
               return;
       }
-      if (!device_is_ready(sensor)) {
-              printk("Device %s is not ready\n", sensor->name);
+      if (!device_is_ready(afe)) {
+              printk("Device %s is not ready\n", afe->name);
               return;
       }
 
-      struct sensor_trigger trig;
-      int rc;
+      struct sensor_trigger afe_trig;
 
-      trig.type = SENSOR_TRIG_DATA_READY;
-      trig.chan = SENSOR_CHAN_ACCEL_XYZ;
+      afe_trig.type = SENSOR_TRIG_DATA_READY;
+      afe_trig.chan = SENSOR_CHAN_VOLTAGE;
 
-      if (IS_ENABLED(CONFIG_LIS2DW12_ODR_RUNTIME)) {
-              struct sensor_value odr = {
-                      .val1 = 2,
-              };
-
-              rc = sensor_attr_set(sensor, trig.chan,
-                                              SENSOR_ATTR_SAMPLING_FREQUENCY,
-                                              &odr);
-              if (rc != 0) {
-                      printk("Failed to set odr: %d\n", rc);
-                      return;
-              }
-              printk("Sampling at %u Hz\n", odr.val1);
-      }
-
-      rc = sensor_trigger_set(sensor, &trig, trigger_handler);
+      rc = sensor_trigger_set(afe, &afe_trig, afe_handler);
       if (rc != 0) {
-              printk("Failed to set trigger: %d\n", rc);
+              printk("Failed to set afe trigger: %d\n", rc);
       }
 
       printk("Waiting for triggers\n");
+
+      // ---------------------------------------------------------- Loop forever
       while (true) {
-              gpio_pin_toggle(dev_led, 14);
               k_sleep(K_MSEC(1000));
       }
 }
+
+//void ble_write_thread(void)
+//{
+//	/* Don't go any further until BLE is initialized */
+//	k_sem_take(&ble_init_ok, K_FOREVER);
+
+//	for (;;) {
+//		/* Wait indefinitely for data to be sent over bluetooth */
+//		struct uart_data_t *buf = k_fifo_get(&fifo_uart_rx_data,
+//						     K_FOREVER);
+
+//		if (bt_nus_send(NULL, buf->data, buf->len)) {
+//			LOG_WRN("Failed to send data over BLE connection");
+//		}
+
+//		k_free(buf);
+//	}
+//}
+
+//K_THREAD_DEFINE(ble_write_thread_id, STACKSIZE, ble_write_thread, NULL, NULL,
+//		NULL, PRIORITY, 0, 0);

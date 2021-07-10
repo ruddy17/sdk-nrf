@@ -1,0 +1,41 @@
+# MCP3912 4-Channel Analog Front End
+
+menuconfig MCP3912
+	bool "MCP3912 sensor"
+	depends on SPI
+	help
+	  Enable driver for MCP3912 4-Channel Analog Front End.
+
+if MCP3912
+
+choice
+	prompt "Trigger mode"
+	default MCP3912_TRIGGER_GLOBAL_THREAD
+	help
+	  Specify the type of triggering used by the driver.
+
+config MCP3912_TRIGGER_GLOBAL_THREAD
+	bool "Use global thread"
+	depends on GPIO
+
+config MCP3912_TRIGGER_OWN_THREAD
+	bool "Use own thread"
+	depends on GPIO
+
+endchoice
+
+config MCP3912_THREAD_PRIORITY
+	int "Thread priority"
+	depends on MCP3912_TRIGGER_OWN_THREAD
+	default 10
+	help
+	  Priority of thread used by the driver to handle interrupts.
+
+config MCP3912_THREAD_STACK_SIZE
+	int "Thread stack size"
+	depends on MCP3912_TRIGGER_OWN_THREAD
+	default 1024
+	help
+	  Stack size of thread used by the driver to handle interrupts.
+
+endif # MCP3912

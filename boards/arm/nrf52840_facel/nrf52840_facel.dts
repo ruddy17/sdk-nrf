@@ -24,12 +24,6 @@
 		};
 	};
 
-	examplesensor0: examplesensor_0 {
-		compatible = "zephyr,examplesensor";
-		label = "EXAMPLESENSOR_0";
-		input-gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-	};
-
 	/* These aliases are provided for compatibility with samples */
 	aliases {
 		led0 = &led0;
@@ -54,35 +48,38 @@
 	sck-pin = <47>;
 	mosi-pin = <45>;
 	miso-pin = <29>;
-	cs-gpios = 	<&gpio0 6 GPIO_ACTIVE_LOW>,
-				<&gpio1 10 GPIO_ACTIVE_LOW>,
-				<&gpio0 4 GPIO_ACTIVE_LOW>;
+	cs-gpios = 	<&gpio0 30 GPIO_ACTIVE_LOW>,
+			<&gpio1 10 GPIO_ACTIVE_LOW>,
+			<&gpio0 6 GPIO_ACTIVE_LOW>;
 
-	accel:lis2dw12@0 {
-		compatible = "st,lis2dw12";
-		label = "LIS2DW12";
-		spi-max-frequency = <1000000>;
+
+        afe:mcp3912@0 {
+		compatible = "microchip,mcp3912";
+		label = "AFE";
+		spi-max-frequency = <5000000>;
 		reg = <0>;
-		irq-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+		drdy-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		rst-gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
 	};
 
 	generator:ad5621@1 {
 		compatible = "ad,ad5621";
-		label = "AD5621";
-		spi-max-frequency = <1000000>;
+		label = "GENERATOR";
+		spi-max-frequency = <5000000>;
 		reg = <1>;
 	};
 
-	converter:mcp3912@2 {
-		compatible = "microchip,mcp3912";
-		label = "MCP3912";
-		spi-max-frequency = <1000000>;
+        accel:lis2dw12@2 {
+		compatible = "st,lis2dw12";
+		label = "ACCEL";
+		spi-max-frequency = <5000000>;
 		reg = <2>;
+		irq-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
 	};
 
 	aliases {
 		accel = &accel;
-		converter = &converter;
+		afe = &afe;
 		generator = &generator;
 	};
 };

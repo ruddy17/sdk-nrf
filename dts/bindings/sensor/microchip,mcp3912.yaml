@@ -1,0 +1,20 @@
+description: MCP3912 4-Channel Analog Front End
+
+compatible: "microchip,mcp3912"
+
+include: spi-device.yaml
+
+properties:
+    drdy-gpios:
+      type: phandle-array
+      required: true
+      description: |
+        The Data Ready pin indicates if a new conversionresult is ready to be read.
+        The default state of this pinis logic high when DR_HIZ=1 and is high-impedancewhen DR_HIZ=0
+        (default). After each conversion is finished, a logic low pulse will take place 
+        on the DataReady pin to indicate the conversion result is ready asan interrupt.
+    rst-gpios:
+      type: phandle-array
+      required: true
+      description: |
+        This pin places the entire chip in a Reset state when low.
